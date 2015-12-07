@@ -1,0 +1,7 @@
+make
+
+./server  absolute_path/ port thread_number
+# important: absolute_path"/"
+
+./client ip port num_thread num_request filename
+
