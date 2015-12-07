@@ -1,0 +1,73 @@
+
+<!DOCTYPE html>
+
+<html>
+<head>
+    <title>sisobus</title>
+<link type="text/css" rel="stylesheet" href="/css/main.css" />
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-42431278-1', 'sisobus.com');
+  ga('send', 'pageview');
+
+</script>
+<script>
+var checkProfileFlag = false;
+function checkTwitterClick(form) {
+    location.href="https://twitter.com/keunyyy";
+    return false;
+}
+function checkFbClick(form) {
+    location.href="http://www.facebook.com/keunyyy";
+    return false;
+}
+function checkBootstrapClick(form) {
+    location.href="/bootstrap";
+    return false;
+}
+function checkProfileClick(form) {
+    checkProfileFlag ^= true;
+    return true;
+}
+</script>
+</head>
+
+<body>
+    <br><br><br>
+    <br><br><br>
+    <br><br>
+    <h2><p></span>siso</span><a href=
+    "/secret">bus</a></p></h2>
+    <p>If you are in memory limit, what would you do?</p>
+
+    <div id="box">
+        <input id="profile" type="checkbox" checked> 
+        <label for="profile">
+        <img src="/secret/pictures/mypicture.jpeg"alt="img" onclick="return checkProfileClick(this);">
+        </label>
+        <span class="entypo-twitter" onclick="return checkTwitterClick(this);"></span> 
+        <span class="entypo-facebook-squared" onclick="return checkFbClick(this);">
+        </span>
+
+        <div id="info">
+          <span>90</span> <i>|</i> 0507<br/>
+            Sangkeun Kim<br/>
+            Sogang univ<br/>
+            <p><a href="http://blog.sisobus.com">BLOG</a></p>
+<!--
+            <p><a href="http://sisobus.com/app">APP</a></p>
+-->
+            <p><a href="http://sisobus.com/resume.pdf">RESUME</a></p>
+            <p><a href="http://django.sisobus.com">DJANGO</a></p>
+<!--  <p class="entypo-dot-3" onclick="return checkBootstrapClick(this);" style="cursor:hand"></p>
+-->
+        </div>
+    </div>
+<script>
+</script>
+</body>
+</html>

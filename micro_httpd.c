@@ -34,12 +34,17 @@
 #include <ctype.h>
 #include <time.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
-
+#include <netinet/in.h>
+#include <pthread.h>
+#include "queue.h"
+#include "m_http.h"
+#include "helperlib.h"
 
 #define SERVER_NAME "micro_httpd"
 #define SERVER_URL "http://www.acme.com/software/micro_httpd/"
-#define PROTOCOL "HTTP/1.0"
+#define PROTOCOL "HTTP/1.1"
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 
 
@@ -52,32 +57,48 @@ static void strdecode( char* to, char* from );
 static int hexit( char c );
 static void strencode( char* to, size_t tosize, const char* from );
 
+static const int DEFAULT_NUM_WORKER = 10;
+static const int MAX_WORKER = 5000;
+static const int MAX_WAIT = 5;
+static const int MAX_LEN_REQUEST = 800;
+
+static const int MAX_NUM_SLASH = 2;
+int port_number;
+char s_port_number[128];
+int num_worker;
+char s_num_worker[128];
+
+struct queue_int_s *clientQueue;
+pthread_mutex_t queue_mutex;
+pthread_cond_t queue_has_client;
+
+void create_worker(pthread_t *workerArr, int *threadId_arr,int numWorker);
+void *handle_client_request(void* workerId);
+char *read_request(int clientSocket);
 
 int
 main( int argc, char** argv )
     {
-        char line[10000], method[10000], path[10000], protocol[10000], idx[20000], location[20000];
+        char  method[10000], path[10000], protocol[10000];
         char* file;
         size_t len;
-        int ich;
         struct stat sb;
-        FILE* fp;
-        struct dirent **dl;
-        int i, n;
-
-        if ( argc != 2 )
+        if ( argc != 4 ) {
+            printf("usage: ./micro_httpd absolute_path/ port num_worker\n");
+            exit(-1);
             send_error( 500, "Internal Error", (char*) 0, "Config error - no dir specified." );
+        }
         if ( chdir( argv[1] ) < 0 )
             send_error( 500, "Internal Error", (char*) 0, "Config error - couldn't chdir()." );
-        if ( fgets( line, sizeof(line), stdin ) == (char*) 0 )
-            send_error( 400, "Bad Request", (char*) 0, "No request found." );
-        if ( sscanf( line, "%[^ ] %[^ ] %[^ ]", method, path, protocol ) != 3 )
-            send_error( 400, "Bad Request", (char*) 0, "Can't parse request." );
-        while ( fgets( line, sizeof(line), stdin ) != (char*) 0 )
-        {
-            if ( strcmp( line, "\n" ) == 0 || strcmp( line, "\r\n" ) == 0 )
-                break;
-        }
+        strcpy(s_port_number,argv[2]);
+        strcpy(s_num_worker,argv[3]);
+        sscanf(s_port_number,"%d",&port_number);
+        sscanf(s_num_worker,"%d",&num_worker);
+
+        strcpy(method,"get");
+        strcpy(path,argv[1]);
+        strcpy(protocol,PROTOCOL);
+
         if ( strcasecmp( method, "get" ) != 0 )
             send_error( 501, "Not Implemented", (char*) 0, "That method is not implemented." );
         if ( path[0] != '/' )
@@ -87,63 +108,193 @@ main( int argc, char** argv )
         if ( file[0] == '\0' )
             file = "./";
         len = strlen( file );
-        //    if ( file[0] == '/' || strcmp( file, ".." ) == 0 || strncmp( file, "../", 3 ) == 0 || strstr( file, "/../" ) != (char*) 0 || strcmp( &(file[len-3]), "/.." ) == 0 )
-        //	send_error( 400, "Bad Request", (char*) 0, "Illegal filename." );
         if ( stat( file, &sb ) < 0 )
             send_error( 404, "Not Found", (char*) 0, "File not found." );
-        if ( S_ISDIR( sb.st_mode ) )
-        {
-            if ( file[len-1] != '/' )
-            {
-                (void) snprintf(
-                        location, sizeof(location), "Location: %s/", path );
-                send_error( 302, "Found", location, "Directories must end with a slash." );
-            }
-            (void) snprintf( idx, sizeof(idx), "%sindex.html", file );
-            if ( stat( idx, &sb ) >= 0 )
-            {
-                file = idx;
-                goto do_file;
-            }
-            send_headers( 200, "Ok", (char*) 0, "text/html", -1, sb.st_mtime );
-            (void) printf( "\
-                    <!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">\n\
-                    <html>\n\
-                    <head>\n\
-                    <meta http-equiv=\"Content-type\" content=\"text/html;charset=UTF-8\">\n\
-                    <title>Index of %s</title>\n\
-                    </head>\n\
-                    <body bgcolor=\"#99cc99\">\n\
-                    <h4>Index of %s</h4>\n\
-                    <pre>\n", file, file );
-            n = scandir( file, &dl, NULL, alphasort );
-            if ( n < 0 )
-                perror( "scandir" );
-            else
-                for ( i = 0; i < n; ++i )
-                    file_details( file, dl[i]->d_name );
-            (void) printf( "\
-                    </pre>\n\
-                    <hr>\n\
-                    <address><a href=\"%s\">%s</a></address>\n\
-                    </body>\n\
-                    </html>\n", SERVER_URL, SERVER_NAME );
-        }
-        else
-        {
-do_file:
-            fp = fopen( file, "r" );
-            if ( fp == (FILE*) 0 )
-                send_error( 403, "Forbidden", (char*) 0, "File is protected." );
-            send_headers( 200, "Ok", (char*) 0, get_mime_type( file ), sb.st_size, sb.st_mtime );
-            while ( ( ich = getc( fp ) ) != EOF )
-                putchar( ich );
-        }
 
-        (void) fflush( stdout );
-        exit( 0 );
+        int bossSocket, numWorker, clientSocket, notOverload, flagSignal;
+        struct sockaddr_in serverAddr, clientAddr;
+        socklen_t clientLen;
+        in_port_t serverPort;
+        pthread_t workerArr[MAX_WORKER];
+        int threadId_arr[MAX_WORKER];
+
+        serverPort = port_number;
+        bossSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if ( bossSocket < 0 ) 
+            print_system_error("socket() fails");
+
+        memset(&serverAddr, 0, sizeof(struct sockaddr_in));
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        serverAddr.sin_port = htons(serverPort);
+
+        if ( bind(bossSocket, (struct sockaddr *)&serverAddr, sizeof(serverAddr) ) < 0 ) 
+            print_system_error("bind() fails");
+
+        clientQueue = create_queue();
+        pthread_mutex_init(&queue_mutex, NULL);
+        pthread_cond_init(&queue_has_client,NULL);
+
+        numWorker = num_worker;
+        create_worker(workerArr, threadId_arr,numWorker);
+
+        if ( listen(bossSocket, MAX_WAIT) < 0 )
+            print_system_error("listen() fails");
+
+        while ( 1 ) {
+            clientLen = sizeof(struct sockaddr_in);
+            clientSocket = accept(bossSocket, (struct sockaddr *)&clientAddr, &clientLen);
+            if ( clientSocket < 0 ) 
+                print_system_error("accept error");
+            pthread_mutex_lock(&queue_mutex);
+            {
+                flagSignal = 0;
+                if ( is_empty_queue(clientQueue) ) 
+                    flagSignal = 1;
+                notOverload = enqueue(clientQueue, clientSocket);
+                if ( flagSignal ) 
+                    pthread_cond_broadcast(&queue_has_client);
+            }
+            pthread_mutex_unlock(&queue_mutex);
+        }
+    }
+void create_worker(pthread_t * workerArr, int * threadId_arr, int numWorker)
+{
+    int threadIndex;
+    int returnVal;
+    char message[100];
+
+    for(threadIndex = 0; threadIndex < numWorker; threadIndex++)
+    {
+        threadId_arr[threadIndex] = threadIndex;
+
+        returnVal = pthread_create(&workerArr[threadIndex], NULL, handle_client_request, &threadId_arr[threadIndex]);
+//        printf("Hi %d\n", threadIndex);
+        if(returnVal)
+        {
+            sprintf(message, "pthread_create() fails with error code %d", returnVal); 
+            print_system_error(message);
+        }
     }
 
+    printf("I am finished\n");
+}
+
+void * handle_client_request(void * workerId)
+{
+    int id = *((int *) workerId); 
+
+    char * request = NULL;
+    int clientSocket, parseSuccess;
+    struct http_request_s * request_obj;
+    struct http_response_s * response_obj;
+    char *response = NULL;
+//    printf("Hullo in %d\n", id);
+    while(1)
+    {
+        clientSocket = -1;
+        printf("Go to loop in %d\n", id);
+        pthread_mutex_lock(&queue_mutex);
+        {
+            if(is_empty_queue(clientQueue))
+            {
+                pthread_cond_wait(&queue_has_client, &queue_mutex);
+            }
+            else 
+                /* Take 1 client out of the queue */
+                dequeue(clientQueue, &clientSocket);
+        }
+        pthread_mutex_unlock(&queue_mutex);
+        printf("Worker with id = %d handles socketId = %d\n", id, clientSocket);
+        if(clientSocket >= 0)
+        {
+            /* Initalize for new request handling */
+            request_obj = create_request_struct();
+            response_obj = create_response_struct();
+            response = NULL;
+
+            /* Handle the request of the client */
+            request = read_request(clientSocket);
+            /*                      ssize_t numByte = recv(clientSocket, m_request, 1000, 0);
+                                    m_request[numByte] = '\0'; */
+        //    printf("OK reading request\n"); 
+            /* Parse request */
+            parseSuccess = parse_http_request(request_obj, request, response_obj);
+
+            response_obj->version = copy_str_dynamic(PROTOCOL);
+
+            if(parseSuccess)
+            {
+                /* Check HTTP version */
+                if(strcasecmp(request_obj->version, PROTOCOL) != 0)
+                {
+                    set_status_code_error(response_obj, 505, "505 HTTP Version Not Supported", "This server supports only HTTP/1.1");
+                }
+                else
+                {
+                    /* Check file access security */
+                    if(count_occurence(request_obj->path, '/') > MAX_NUM_SLASH)
+                        set_status_code_error(response_obj, 401, "401 Unauthorized", "You are not authorized to access the requested file on this server");
+                    else
+                    {
+                        exec_http_request(request_obj, response_obj);
+                    }
+                }
+            } 
+            /* Execute command and return output 
+               sprintf(response, "Server worker thread with id = %d handles request: %s", id, request); */
+
+            response = get_response_text(response_obj);
+            send(clientSocket, response, strlen(response), 0);
+
+            //recv(clientSocket, response, 100, 0);
+            /* Close socket, free memory */
+            close(clientSocket);
+            free(request);
+            free(response);
+            delete_request(&request_obj);
+            delete_response(&response_obj); 
+        }
+    }
+}
+
+/* Here, "\r\n" signifies the end of a request */
+char * read_request(int clientSocket)
+{
+    char buffer[MAX_LEN_REQUEST];
+    int totalByte = 0;
+    ssize_t numByteRecv, curBufferLen;
+    char *curBuffer;
+
+    curBuffer = buffer;
+    curBufferLen = MAX_LEN_REQUEST;
+    do
+    {
+        numByteRecv = recv(clientSocket, curBuffer, curBufferLen - 1, 0);
+        printf("numByte = %d\n", numByteRecv);
+        if(numByteRecv < 0)
+            print_system_error("recv() fails");
+        else
+        { 
+            /* Check if we reach the end of HTTP request */
+            totalByte += (int) numByteRecv;
+            if(totalByte >= 2 && buffer[totalByte - 1] == '\n' && buffer[totalByte - 2] == '\r')
+            {
+                buffer[totalByte] = '\0';
+                break;
+            }
+            else
+            {
+                curBuffer = curBuffer + numByteRecv;
+                curBufferLen -= (int) numByteRecv;
+            }
+        }
+    } while(numByteRecv);
+
+    buffer[totalByte] = '\0';
+
+    return copy_str_dynamic(buffer);
+}
 
     static void
 file_details( char* dir, char* name )
